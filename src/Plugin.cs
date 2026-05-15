@@ -10,8 +10,8 @@ namespace ToySerialController
 {
     public partial class Plugin : MVRScript
     {
-        public static readonly string PluginName = "Toy Serial Controller";
-        public static readonly string PluginAuthor = "Yoooi";
+        public static readonly string PluginName = "Toy Serial Controller Dancer Fork";
+        public static readonly string PluginAuthor = "MahiroOyama";
         public static readonly string PluginDir = $@"Custom\Scripts\{PluginAuthor}\{PluginName.Replace(" ", "")}";
 
         private IDevice _device;

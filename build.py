@@ -10,8 +10,8 @@ else:
     version = int(input('var version: '))
 
 cslistName = 'ADD_ME.cslist'
-varName = 'Yoooi.ToySerialController.{}.var'.format(version)
-zipPath = 'Custom\\Scripts\\Yoooi\\ToySerialController\\'
+varName = 'MahiroOyama.ToySerialControllerDancerFork.{}.var'.format(version)
+zipPath = 'Custom\\Scripts\\MahiroOyama\\ToySerialControllerDancerFork\\'
 
 print('Reading meta.json')
 with open('meta.json') as f:

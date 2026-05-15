@@ -27,7 +27,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ github.ref }}
-        release_name: ToySerialController v${{ env.VERSION }}
+        release_name: ToySerialControllerDancerFork v${{ env.VERSION }}
         draft: false
         prerelease: false
     - name: Upload Release Artifact
@@ -36,6 +36,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create-release.outputs.upload_url }}
-        asset_name: Yoooi.ToySerialController.${{ env.VERSION }}.var
-        asset_path: ./Yoooi.ToySerialController.${{ env.VERSION }}.var
+        asset_name: MahiroOyama.ToySerialControllerDancerFork.${{ env.VERSION }}.var
+        asset_path: ./MahiroOyama.ToySerialControllerDancerFork.${{ env.VERSION }}.var
         asset_content_type: application/zip

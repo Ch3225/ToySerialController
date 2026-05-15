@@ -24,6 +24,7 @@ namespace ToySerialController.MotionSource
         private JSONStorableFloat TargetForwardOffsetSlider;
         private UIDynamicButton AutoTargetsTitle;
         private List<JSONStorableBool> AutoTargetToggles;
+        private bool _selectionChanged;
 
         protected SuperController Controller => SuperController.singleton;
 
@@ -31,6 +32,21 @@ namespace ToySerialController.MotionSource
         public Vector3 Up { get; protected set; }
         public Vector3 Right { get; protected set; }
         public Vector3 Forward { get; protected set; }
+        public Vector3 RootPosition => _personAtom?.mainController != null ? _personAtom.mainController.transform.position : _position;
+        public Quaternion RootRotation => _personAtom?.mainController != null ? _personAtom.mainController.transform.rotation : Quaternion.LookRotation(Forward, Up);
+        public float SizeScale
+        {
+            get
+            {
+                var scaleTransform = _personAtom?.containingAtom?.reParentObject?.Find("object/rescaleObject");
+                if (scaleTransform == null)
+                    return 1f;
+
+                var scale = scaleTransform.lossyScale.y;
+                return scale > Mathf.Epsilon ? scale : 1f;
+            }
+        }
+        public float BaseHeightMeters => TargetGender == DAZCharacterSelector.Gender.Male ? 1.8f : 1.65f;
 
         protected abstract string DefaultTarget { get; }
 
@@ -77,6 +93,7 @@ namespace ToySerialController.MotionSource
             PersonChooser = builder.CreatePopup($"MotionSource:{TargetGender}", $"Select {TargetGender}", null, null, TargetPersonChooserCallback);
             TargetChooser = builder.CreateScrollablePopup($"MotionSource:{TargetGender}Target", "Select Target Point", _targets.Keys.ToList(), DefaultTarget, v =>
             {
+                _selectionChanged = true;
                 var isAuto = v == "Auto";
                 autoGroup.SetVisible(isAuto);
                 autoTargetsGroup.SetVisible(isAuto && autoTargetsGroupVisible);
@@ -317,6 +334,14 @@ namespace ToySerialController.MotionSource
         {
             _personAtom = Controller.GetAtomByUid(s);
             PersonChooser.valNoCallback = _personAtom == null ? "None" : s;
+            _selectionChanged = true;
+        }
+
+        public bool ConsumeSelectionChanged()
+        {
+            var changed = _selectionChanged;
+            _selectionChanged = false;
+            return changed;
         }
 
         public void Refresh() => FindTargets(PersonChooser.val);

@@ -28,6 +28,7 @@ src\MotionSource\AnimationMotionSource.cs
 src\MotionSource\CompositeMotionSource.cs
 src\MotionSource\IMotionSource.cs
 src\MotionSource\RangeTestMotionSource.cs
+src\MotionSource\SinglePersonVirtualReferenceMotionSource.cs
 src\MotionSource\References\AssetReference.cs
 src\MotionSource\References\DildoReference.cs
 src\MotionSource\References\IMotionSourceReference.cs

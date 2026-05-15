@@ -1,27 +1,20 @@
-<div align="center">
-    <h1>ToySerialController</h1>
-    <br/>
-    <img src=".github/assets/screenshot-1.png" width="400"/>
-    <img src=".github/assets/screenshot-2.png" width="400"/>
-</div>
+# ToySerialController DancerFork
 
-<br/>
+ToySerialController DancerFork is a derivative of the original ToySerialController plugin, focused on MMD and dancer-oriented VaM workflows.
 
-# About
+This fork primarily adds and extends the Virtual Reference workflow so dancer-style motion can drive T-Code output with a controllable virtual insertion reference, follow behavior, and spring-damper motion.
 
-ToySerialController is a VaM (Virt-a-Mate) plugin that synchronizes your [OSR](https://www.patreon.com/tempestvr) with the motion in the scene.
+## Upstream
+- Original project: ToySerialController
+- Original project link: https://github.com/Yoooi0/ToySerialController
 
-# Features
+## Scope
+- Preserve the original ToySerialController lineage and attribution
+- Add dancer and MMD-focused behavior changes on top of the original plugin
+- Use this repository as the source repository for future VAR releases
 
-* Serial and UDP TCode output
-* Multiple motion sources: 
-    * "Male + Female"
-    * "Asset + Female"
-    * "Toy + Female"
-    * "Male + Asset"
-    * "Male + Male"
-    * "Asset + Male"
-    * "Toy + Male"
-    * "Animation Pattern"
-* Supports TCode v0.3
-* Custom curve editor for V0, A0, A1, A2
+## License
+This fork is released under the MIT License. See LICENSE for details.
+
+## Packaging
+The distributable VAR package should be built from the VaM package builder or an equivalent packaging step, not from this Git repository directly.
