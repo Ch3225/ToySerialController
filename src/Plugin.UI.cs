@@ -82,7 +82,7 @@ namespace ToySerialController
             {
                 "Male + Female", "Asset + Female", "Dildo + Female",
                 "Male + Asset", "Male + Male", "Asset + Male", "Dildo + Male",
-                "Virtual Reference + Female", "Virtual Reference + Male",
+                    "Empty + Female", "Empty + Male",
                 "Animation Pattern", "Range Test"
             };
             MotionSourceChooser = _group.CreatePopup("Plugin:MotionSourceChooser", "Select motion source", motionSources, "Male + Female", MotionSourceChooserCallback);
@@ -168,10 +168,10 @@ namespace ToySerialController
                 _motionSource = new CompositeMotionSource(new AssetReference(), new MaleTarget());
             else if (s == "Dildo + Male")
                 _motionSource = new CompositeMotionSource(new DildoReference(), new MaleTarget());
-            else if (s == "Virtual Reference + Female")
-                _motionSource = new SinglePersonVirtualReferenceMotionSource(new FemaleTarget(), "VirtualReferenceFemale");
-            else if (s == "Virtual Reference + Male")
-                _motionSource = new SinglePersonVirtualReferenceMotionSource(new MaleTarget(), "VirtualReferenceMale");
+            else if (s == "Empty + Female")
+                _motionSource = new CompositeMotionSource(new EmptyReference(), new FemaleTarget());
+            else if (s == "Empty + Male")
+                _motionSource = new CompositeMotionSource(new EmptyReference(), new MaleTarget());
             else if (s == "Animation Pattern")
                 _motionSource = new AnimationMotionSource();
             else if (s == "Range Test")

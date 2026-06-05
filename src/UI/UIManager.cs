@@ -54,6 +54,14 @@ namespace ToySerialController.UI
             return storable;
         }
 
+        public static JSONStorableFloat GetFloat(string paramName)
+        {
+            if (Instance == null || Instance.plugin == null)
+                return null;
+
+            return Instance.plugin.GetFloatJSONParam(paramName);
+        }
+
         public static void RemoveFloat(JSONStorableFloat storable) => Instance.plugin.DeregisterFloat(storable);
 
         public static void RemoveSpacer(UIDynamic o) => Instance.plugin.RemoveSpacer(o);

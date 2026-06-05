@@ -28,9 +28,12 @@ src\MotionSource\AnimationMotionSource.cs
 src\MotionSource\CompositeMotionSource.cs
 src\MotionSource\IMotionSource.cs
 src\MotionSource\RangeTestMotionSource.cs
-src\MotionSource\SinglePersonVirtualReferenceMotionSource.cs
+src\MotionSource\Driven\DrivenMode.cs
+src\MotionSource\Driven\DrivenAnchorEmpty.cs
 src\MotionSource\References\AssetReference.cs
 src\MotionSource\References\DildoReference.cs
+src\MotionSource\References\EmptyReference.cs
+src\MotionSource\References\IDrivableReference.cs
 src\MotionSource\References\IMotionSourceReference.cs
 src\MotionSource\References\MaleReference.cs
 src\MotionSource\Targets\AbstractPersonTarget.cs

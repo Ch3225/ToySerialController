@@ -3,37 +3,34 @@ using UnityEngine;
 
 namespace ToySerialController.MotionSource
 {
-    // Manages the cyan "driven anchor" Empty atom that the user freely
-    // positions in the scene. Its world pose feeds into DrivenMode as the
-    // baseline that Offset0 is applied on top of. It is parented to the
-    // person's main controller so it rigidly follows the character.
-    //
-    // The atom is VISIBLE (not hidden) so the user can grab it in VR/desktop.
-    // On Reset, we re-place it at (target position + a sensible default offset)
-    // and re-attach the parent link.
     public class DrivenAnchorEmpty
     {
-        private const string AtomUidPrefix = "TSC_DrivenAnchor_";
+        private const string AtomUidPrefix = "TSC_DrivenReferencePoint_";
 
         private readonly string _key;
-        private Atom _anchorAtom;
-        private bool _creationInFlight;
+
+        private Atom _atom;
+        private bool _creating;
+        private string _linkedPersonUid;
+        private string _selectedAtomUid;
 
         public DrivenAnchorEmpty(string key)
         {
             _key = key;
+            _selectedAtomUid = DefaultAtomUid;
         }
 
-        public string AtomUid => AtomUidPrefix + _key;
+        public string DefaultAtomUid => AtomUidPrefix + _key;
+        public string SelectedAtomUid => string.IsNullOrEmpty(_selectedAtomUid) ? "None" : _selectedAtomUid;
 
-        public bool HasAnchor => _anchorAtom != null && _anchorAtom.on;
+        public bool HasAtom => _atom != null && _atom.on;
 
         public Vector3 Position
         {
             get
             {
-                var t = GetTransform();
-                return t != null ? t.position : Vector3.zero;
+                var transform = GetTransform();
+                return transform != null ? transform.position : Vector3.zero;
             }
         }
 
@@ -41,73 +38,175 @@ namespace ToySerialController.MotionSource
         {
             get
             {
-                var t = GetTransform();
-                return t != null ? t.rotation : Quaternion.identity;
+                var transform = GetTransform();
+                return transform != null ? transform.rotation : Quaternion.identity;
             }
         }
 
-        // Find existing atom or kick off creation. Returns true if anchor is
-        // immediately available; false if a coroutine has been started and
-        // the caller should retry next frame.
-        public bool EnsureExists()
+        public bool EnsureExists(AbstractPersonTarget personTarget, Vector3 defaultPosition, Quaternion defaultRotation)
         {
-            if (HasAnchor) return true;
+            if (HasAtom)
+            {
+                EnsureParentLink(personTarget);
+                return true;
+            }
 
-            _anchorAtom = SuperController.singleton.GetAtomByUid(AtomUid);
-            if (_anchorAtom != null) return true;
+            _atom = SuperController.singleton.GetAtomByUid(_selectedAtomUid);
+            if (_atom != null && _atom.on)
+            {
+                EnsureParentLink(personTarget);
+                return true;
+            }
 
-            if (_creationInFlight) return false;
-            _creationInFlight = true;
-            SuperController.singleton.StartCoroutine(CreateCoroutine());
+            if (_selectedAtomUid != DefaultAtomUid)
+                return false;
+
+            if (_creating)
+                return false;
+
+            _creating = true;
+            SuperController.singleton.StartCoroutine(CreateAnchorCoroutine(personTarget, defaultPosition, defaultRotation));
             return false;
         }
 
-        // Place anchor at default position relative to the given target pose,
-        // and parent it to the given atom (person). Safe to call repeatedly.
-        public void Reset(Vector3 targetPos, Quaternion targetRot, Atom parentAtom)
+        public void ResetToDefault(AbstractPersonTarget personTarget, Vector3 defaultPosition, Quaternion defaultRotation)
         {
-            if (!EnsureExists()) return;
-            var t = GetTransform();
-            if (t == null) return;
+            // Re-point both _selectedAtomUid AND _atom at the default atom; otherwise if the user previously
+            // chose a non-default Empty in the chooser, _atom still references that one and HasAtom would
+            // make EnsureExists operate on the wrong atom — the default atom never moves and Reset appears
+            // to do nothing.
+            _selectedAtomUid = DefaultAtomUid;
+            _atom = SuperController.singleton.GetAtomByUid(DefaultAtomUid);
+            if (!EnsureExists(personTarget, defaultPosition, defaultRotation))
+                return;
 
-            // Default offset = a few cm above target along its up axis.
-            // Matches the original VR-mode "reference point" sitting above
-            // the pelvis. User can drag from there.
-            var offset = Vector3.zero;
-            t.position = targetPos + targetRot * offset;
-            t.rotation = targetRot;
+            // VaM's SelectLinkToRigidbody won't recapture the relative offset if the controller is already
+            // linked to the same rigidbody. Explicitly unlink first so ApplyPose's new position becomes the
+            // new anchor offset when we re-link below.
+            var controller = _atom != null ? _atom.mainController : null;
+            if (controller != null)
+                controller.SelectLinkToRigidbody(null, FreeControllerV3.SelectLinkState.PositionAndRotation);
+            _linkedPersonUid = null;
 
-            TrySetParent(parentAtom);
+            ApplyPose(defaultPosition, defaultRotation);
+            EnsureParentLink(personTarget);
         }
 
-        // Drop the parent link (e.g. when motion source is destroyed) but
-        // leave the atom in the scene so the user keeps their tuning.
-        public void Detach() { /* keep atom + parent link */ }
+        public void SelectAtom(Atom atom)
+        {
+            _atom = atom;
+            _selectedAtomUid = atom != null ? atom.uid : null;
+            _linkedPersonUid = null;
+        }
+
+        public void SelectAtomUid(string atomUid)
+        {
+            if (string.IsNullOrEmpty(atomUid) || atomUid == "None")
+            {
+                _atom = null;
+                _selectedAtomUid = null;
+                _linkedPersonUid = null;
+                return;
+            }
+
+            SelectAtom(SuperController.singleton.GetAtomByUid(atomUid));
+            if (_atom == null)
+                _selectedAtomUid = atomUid;
+        }
+
+        public bool FindExistingOrCreateDefault(AbstractPersonTarget personTarget, Vector3 defaultPosition, Quaternion defaultRotation)
+        {
+            _selectedAtomUid = DefaultAtomUid;
+            _atom = SuperController.singleton.GetAtomByUid(DefaultAtomUid);
+            if (_atom != null && _atom.on)
+            {
+                EnsureParentLink(personTarget);
+                return true;
+            }
+
+            if (_creating)
+                return false;
+
+            _creating = true;
+            SuperController.singleton.StartCoroutine(CreateAnchorCoroutine(personTarget, defaultPosition, defaultRotation));
+            return false;
+        }
+
+        private IEnumerator CreateAnchorCoroutine(AbstractPersonTarget personTarget, Vector3 defaultPosition, Quaternion defaultRotation)
+        {
+            yield return SuperController.singleton.AddAtomByType("Empty", DefaultAtomUid);
+
+            _creating = false;
+            _atom = SuperController.singleton.GetAtomByUid(DefaultAtomUid);
+            _selectedAtomUid = DefaultAtomUid;
+            if (_atom == null || !_atom.on)
+                yield break;
+
+            ApplyPose(defaultPosition, defaultRotation);
+            EnsureParentLink(personTarget);
+        }
+
+        private void ApplyPose(Vector3 position, Quaternion rotation)
+        {
+            var controller = _atom != null ? _atom.mainController : null;
+            if (controller != null)
+            {
+                var control = controller.control;
+                if (control != null)
+                {
+                    control.position = position;
+                    control.rotation = rotation;
+                }
+
+                controller.transform.position = position;
+                controller.transform.rotation = rotation;
+
+                if (controller.followWhenOff != null)
+                {
+                    controller.followWhenOff.position = position;
+                    controller.followWhenOff.rotation = rotation;
+                }
+
+                controller.onPositionChangeHandlers?.Invoke(controller);
+                return;
+            }
+
+            var transform = GetTransform();
+            if (transform == null)
+                return;
+
+            transform.position = position;
+            transform.rotation = rotation;
+        }
+
+        private void EnsureParentLink(AbstractPersonTarget personTarget)
+        {
+            if (personTarget == null || personTarget.PersonAtom == null)
+                return;
+
+            var controller = _atom != null ? _atom.mainController : null;
+            var personController = personTarget.PersonAtom.mainController;
+            if (controller == null || personController == null)
+                return;
+
+            var personUid = personTarget.PersonAtom.uid;
+            if (_linkedPersonUid == personUid)
+                return;
+
+            var rigidbody = personController.GetComponent<Rigidbody>();
+            if (rigidbody == null)
+                return;
+
+            controller.SelectLinkToRigidbody(rigidbody, FreeControllerV3.SelectLinkState.PositionAndRotation);
+            _linkedPersonUid = personUid;
+        }
 
         private Transform GetTransform()
         {
-            if (!HasAnchor) return null;
-            return _anchorAtom.mainController != null
-                ? _anchorAtom.mainController.transform
-                : _anchorAtom.transform;
-        }
+            if (_atom == null || !_atom.on)
+                return null;
 
-        private void TrySetParent(Atom parentAtom)
-        {
-            if (_anchorAtom == null || parentAtom == null) return;
-            try
-            {
-                if (_anchorAtom.parentAtom != parentAtom)
-                    _anchorAtom.SelectAtomParent(parentAtom);
-            }
-            catch { /* swallow; user can parent manually */ }
-        }
-
-        private IEnumerator CreateCoroutine()
-        {
-            yield return SuperController.singleton.AddAtomByType("Empty", AtomUid);
-            _anchorAtom = SuperController.singleton.GetAtomByUid(AtomUid);
-            _creationInFlight = false;
+            return _atom.mainController != null ? _atom.mainController.transform : _atom.transform;
         }
     }
 }

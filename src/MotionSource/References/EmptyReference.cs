@@ -21,6 +21,7 @@ namespace ToySerialController.MotionSource
         private Atom _emptyAtom;
         private bool _autoCreateAttempted;
 
+        private UIDynamicButton EmptyTitle;
         private JSONStorableStringChooser EmptyChooser;
         private JSONStorableFloat LengthSlider;
         private JSONStorableFloat RadiusSlider;
@@ -41,8 +42,8 @@ namespace ToySerialController.MotionSource
 
         // IDrivableReference: this Reference can be driven by our algorithm.
         public Atom DrivenAtom => _emptyAtom;
-        public DrivenReferenceKind DrivenKind => DrivenReferenceKind.Empty;
-        public DrivenMode Driven => _drivenMode;
+        public string DrivenKind => DrivenReferenceKind.Empty;
+        public DrivenMode DrivenMode => _drivenMode;
 
         public EmptyReference()
         {
@@ -51,8 +52,9 @@ namespace ToySerialController.MotionSource
 
         public void CreateUI(IUIBuilder builder)
         {
-            EmptyChooser = builder.CreatePopup("MotionSource:Empty", "Select Empty", null, null, EmptyChooserCallback);
-            CreateOrFindButton = builder.CreateButton("Create/Find " + DefaultEmptyAtomUid, EnsureDefaultEmpty, new Color(0, 0.75f, 1f) * 0.8f, Color.white);
+            EmptyTitle = builder.CreateDisabledButton("Virtual Dildo Empty", new Color(0.3f, 0.3f, 0.3f), Color.white);
+            EmptyChooser = builder.CreatePopup("MotionSource:Empty", "Select Virtual Dildo Empty", null, null, EmptyChooserCallback);
+            CreateOrFindButton = builder.CreateButton("Find/Rebuild Virtual Dildo Empty", EnsureDefaultEmpty, new Color(0, 0.75f, 1f) * 0.8f, Color.white);
             LengthSlider = builder.CreateSlider("MotionSource:EmptyLengthCm", "Virtual Dildo Length (cm)", 14f, 2f, 100f, true, true, valueFormat: "F1");
             RadiusSlider = builder.CreateSlider("MotionSource:EmptyRadiusCm", "Virtual Dildo Radius (cm)", 1.5f, 0.2f, 10f, true, true, valueFormat: "F2");
 
@@ -66,6 +68,7 @@ namespace ToySerialController.MotionSource
             _drivenMode.Disable();
             _drivenMode.DestroyUI(builder);
 
+            builder.Destroy(EmptyTitle);
             builder.Destroy(EmptyChooser);
             builder.Destroy(CreateOrFindButton);
             builder.Destroy(LengthSlider);

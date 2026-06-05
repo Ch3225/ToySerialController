@@ -29,6 +29,7 @@ namespace ToySerialController.MotionSource
         protected SuperController Controller => SuperController.singleton;
 
         public Vector3 Position => _position + Up * TargetUpOffsetSlider.val + Forward * TargetForwardOffsetSlider.val;
+        public Atom PersonAtom => _personAtom;
         public Vector3 Up { get; protected set; }
         public Vector3 Right { get; protected set; }
         public Vector3 Forward { get; protected set; }

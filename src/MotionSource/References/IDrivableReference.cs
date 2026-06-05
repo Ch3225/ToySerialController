@@ -1,11 +1,15 @@
 namespace ToySerialController.MotionSource
 {
     // Reference kinds that the driven-mode controller can drive.
-    public enum DrivenReferenceKind
+    // NOTE: declared as string constants (NOT an enum) because VaM's embedded
+    // Mono MCS crashes the host process when a plugin assembly contains a
+    // newly-introduced enum type. Use DrivenReferenceKind.Xxx exactly like an
+    // enum at call sites; the underlying type is string.
+    public static class DrivenReferenceKind
     {
-        Dildo,
-        CustomUnityAsset,
-        Empty
+        public const string Dildo = "Dildo";
+        public const string CustomUnityAsset = "CustomUnityAsset";
+        public const string Empty = "Empty";
     }
 
     // Implemented by Reference types whose backing atom can be driven by
@@ -14,7 +18,7 @@ namespace ToySerialController.MotionSource
     public interface IDrivableReference
     {
         Atom DrivenAtom { get; }
-        DrivenReferenceKind DrivenKind { get; }
-        DrivenMode Driven { get; }
+        string DrivenKind { get; }
+        DrivenMode DrivenMode { get; }
     }
 }
