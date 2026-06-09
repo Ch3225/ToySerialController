@@ -1,3 +1,5 @@
+using UnityEngine;
+
 namespace ToySerialController.MotionSource
 {
     // Reference kinds that the driven-mode controller can drive.
@@ -20,5 +22,9 @@ namespace ToySerialController.MotionSource
         Atom DrivenAtom { get; }
         string DrivenKind { get; }
         DrivenMode DrivenMode { get; }
+
+        // W[Pi] (insertion part) - real-time, must be derived from the underlying atom each frame.
+        Vector3 InsertionPoint { get; }
+        Quaternion InsertionRotation { get; }
     }
 }

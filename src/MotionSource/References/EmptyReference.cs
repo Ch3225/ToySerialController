@@ -45,6 +45,21 @@ namespace ToySerialController.MotionSource
         public string DrivenKind => DrivenReferenceKind.Empty;
         public DrivenMode DrivenMode => _drivenMode;
 
+        // W[Pi] for an Empty: the empty's origin (the base of the virtual shaft).
+        public Vector3 InsertionPoint => Position;
+
+        public Quaternion InsertionRotation
+        {
+            get
+            {
+                if (_emptyAtom == null || !_emptyAtom.on || _emptyAtom.mainController == null)
+                    return Up.sqrMagnitude > 1e-8f && Forward.sqrMagnitude > 1e-8f
+                        ? Quaternion.LookRotation(Forward, Up)
+                        : Quaternion.identity;
+                return _emptyAtom.mainController.transform.rotation;
+            }
+        }
+
         public EmptyReference()
         {
             _drivenMode = new DrivenMode(this);

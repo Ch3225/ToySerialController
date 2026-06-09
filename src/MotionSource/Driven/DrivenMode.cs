@@ -22,6 +22,7 @@ namespace ToySerialController.MotionSource
         private UIGroup _restGroup;
         private UIGroup _compensationGroup;
         private UIGroup _followGroup;
+        private UIGroup _speedFieldGroup;
         private UIGroup _springGroup;
         private UIGroup _damperGroup;
 
@@ -60,7 +61,8 @@ namespace ToySerialController.MotionSource
         private JSONStorableFloat _followRollFactor;
         private JSONStorableFloat _followPitchFactor;
         private JSONStorableBool _velocityFollowEnabled;
-        private JSONStorableBool _speedFilterEnabled;
+        // Speed Filter disabled per spec: only spring-damper should be retained.
+        //private JSONStorableBool _speedFilterEnabled;
 
         private JSONStorableFloat _springUp;
         private JSONStorableFloat _springRight;
@@ -76,6 +78,7 @@ namespace ToySerialController.MotionSource
         private JSONStorableFloat _velocityDampingRoll;
         private JSONStorableFloat _velocityDampingPitch;
 
+        // Target smoothing fields kept for config-key compatibility but no longer wired into the physics or UI.
         private JSONStorableFloat _targetSmoothingUp;
         private JSONStorableFloat _targetSmoothingRight;
         private JSONStorableFloat _targetSmoothingForward;
@@ -87,6 +90,7 @@ namespace ToySerialController.MotionSource
         private Vector3 _targetUp;
         private Vector3 _targetRight;
         private Vector3 _targetForward;
+        private Quaternion _targetRotation;
         private AbstractPersonTarget _currentPersonTarget;
         private Vector3 _prevTargetPosition;
         private Quaternion _prevTargetRotation;
@@ -113,6 +117,38 @@ namespace ToySerialController.MotionSource
         private bool _gravityStatesSaved;
         private Vector3 _smoothedSpringTargetLocalPosition;
         private Vector3 _smoothedSpringTargetLocalEuler;
+        private Vector3 _prevPiInQpLocalPosition;
+        private Vector3 _prevPiInQpLocalEuler;
+
+        // Phase 2: Speed-field (purple) state. Tracks Pi's last sampled pose in Q's local frame
+        // and the per-dimension velocity/weight state. Reset on init / scene change.
+        private Vector3 _fieldLastPiWorldPos;
+        private Quaternion _fieldLastPiWorldRot;
+        private readonly float[] _vRelBuf = new float[6];
+        private Vector3 _fieldLastQPosition;
+        private Quaternion _fieldLastQRotation;
+        private float _fieldLastTime;
+        private bool _fieldInitialized;
+        // Per-dimension R[X] and last velocity for the field; size = 6.
+        private readonly float[] _fieldRx = new float[6];
+        private readonly float[] _fieldEd = new float[6];
+        private readonly float[] _fieldEu = new float[6];
+        private readonly float[] _fieldLastVelocityInQ = new float[6];
+        private readonly float[] _fieldBiasVelocityInQ = new float[6];
+        private readonly float[] _fieldNewVelocityInQ = new float[6];
+        private readonly float[] _fieldLastWeight = new float[6];
+        private readonly bool[] _fieldLastMovingToM = new bool[6];
+        private readonly bool[] _fieldWasActive = new bool[6];
+        private Vector3 _fieldBiasPos;
+        private Vector3 _fieldBiasEuler;
+        // New UI storables
+        private JSONStorableBool _speedFieldEnabled;
+        private JSONStorableFloat _espSlider;
+        private JSONStorableBool _speedFieldPosLossEnabled;
+        private JSONStorableBool _speedFieldRotLossEnabled;
+        private JSONStorableBool _speedFieldPosGainEnabled;
+        private JSONStorableBool _speedFieldRotGainEnabled;
+        private JSONStorableString _speedFieldDebugText;
 
         private bool _initialized;
         private bool _smoothedSpringTargetInitialized;
@@ -125,6 +161,7 @@ namespace ToySerialController.MotionSource
         private bool _restVisible;
         private bool _compensationVisible;
         private bool _followVisible;
+        private bool _speedFieldVisible;
         private bool _springVisible;
         private bool _damperVisible;
 
@@ -199,14 +236,26 @@ namespace ToySerialController.MotionSource
             followSectionGroup.CreateButton("Velocity Effected to Dildo", ToggleFollowVisibility, new Color(0.3f, 0.3f, 0.3f), Color.white);
             _followGroup = new UIGroup(followSectionGroup);
             _velocityFollowEnabled = _followGroup.CreateToggle($"MotionSource:{_keyPrefix}:UseVelocityFollow", "Use Velocity Follow", true, OnVelocityFollowChanged);
-            if (UsesEngineHoldSpring)
-                _speedFilterEnabled = _followGroup.CreateToggle($"MotionSource:{_keyPrefix}:UseSpeedFilter", "Use Speed Filter", false, OnSpeedFilterChanged);
+            // Speed Filter disabled per spec.
+            //if (UsesEngineHoldSpring)
+            //    _speedFilterEnabled = _followGroup.CreateToggle($"MotionSource:{_keyPrefix}:UseSpeedFilter", "Use Speed Filter", false, OnSpeedFilterChanged);
             _followUpFactor = _followGroup.CreateSlider($"MotionSource:{_keyPrefix}:FollowUp", "Follow Up (%)", 0.2f, 0f, 1f, true, true, valueFormat: "P0");
             _followRightFactor = _followGroup.CreateSlider($"MotionSource:{_keyPrefix}:FollowRight", "Follow Right (%)", 0.8f, 0f, 1f, true, true, valueFormat: "P0");
             _followForwardFactor = _followGroup.CreateSlider($"MotionSource:{_keyPrefix}:FollowForward", "Follow Forward (%)", 0.8f, 0f, 1f, true, true, valueFormat: "P0");
             _followTwistFactor = _followGroup.CreateSlider($"MotionSource:{_keyPrefix}:FollowYaw", "Follow Twist (%)", 0.3f, 0f, 1f, true, true, valueFormat: "P0");
             _followRollFactor = _followGroup.CreateSlider($"MotionSource:{_keyPrefix}:FollowRoll", "Follow Roll (%)", 0.3f, 0f, 1f, true, true, valueFormat: "P0");
             _followPitchFactor = _followGroup.CreateSlider($"MotionSource:{_keyPrefix}:FollowPitch", "Follow Pitch (%)", 0.3f, 0f, 1f, true, true, valueFormat: "P0");
+
+            var speedFieldSectionGroup = new UIGroup(_drivenContentGroup);
+            speedFieldSectionGroup.CreateButton("Speed Field (Purple)", ToggleSpeedFieldVisibility, new Color(0.3f, 0.3f, 0.3f), Color.white);
+            _speedFieldGroup = new UIGroup(speedFieldSectionGroup);
+            _speedFieldEnabled = _speedFieldGroup.CreateToggle($"MotionSource:{_keyPrefix}:SpeedFieldEnabled", "Speed Field Enabled", true);
+            _espSlider = _speedFieldGroup.CreateSlider($"MotionSource:{_keyPrefix}:FieldEsp", "Esp", 0.1f, 0f, 0.5f, true, true, valueFormat: "F2");
+            _speedFieldPosLossEnabled = _speedFieldGroup.CreateToggle($"MotionSource:{_keyPrefix}:SpeedFieldPosLoss", "Pos Loss (Ed)", true);
+            _speedFieldRotLossEnabled = _speedFieldGroup.CreateToggle($"MotionSource:{_keyPrefix}:SpeedFieldRotLoss", "Rot Loss (Ed)", true);
+            _speedFieldPosGainEnabled = _speedFieldGroup.CreateToggle($"MotionSource:{_keyPrefix}:SpeedFieldPosGain", "Pos Gain (Eu)", true);
+            _speedFieldRotGainEnabled = _speedFieldGroup.CreateToggle($"MotionSource:{_keyPrefix}:SpeedFieldRotGain", "Rot Gain (Eu)", true);
+            _speedFieldDebugText = _speedFieldGroup.CreateTextField($"MotionSource:{_keyPrefix}:SpeedFieldDebug", "Speed Field Debug", 300f);
 
             var springSectionGroup = new UIGroup(_drivenContentGroup);
             springSectionGroup.CreateButton("Spring", ToggleSpringVisibility, new Color(0.3f, 0.3f, 0.3f), Color.white);
@@ -221,21 +270,22 @@ namespace ToySerialController.MotionSource
             var damperSectionGroup = new UIGroup(_drivenContentGroup);
             damperSectionGroup.CreateButton("Damper", ToggleDamperVisibility, new Color(0.3f, 0.3f, 0.3f), Color.white);
             _damperGroup = new UIGroup(damperSectionGroup);
-            _damperGroup.CreateDisabledButton("Velocity Damping", new Color(1.0f, 1.0f, 1.0f, 0.075f), Color.white);
-            _velocityDampingUp = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingUp", "Up", 20f);
-            _velocityDampingRight = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingRight", "Right", 8f);
-            _velocityDampingForward = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingForward", "Forward", 8f);
-            _velocityDampingTwist = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingTwist", "Twist", 8f);
-            _velocityDampingRoll = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingRoll", "Roll", 8f);
-            _velocityDampingPitch = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingPitch", "Pitch", 8f);
+            _damperGroup.CreateDisabledButton("Velocity Damping (Q-Frame)", new Color(1.0f, 1.0f, 1.0f, 0.075f), Color.white);
+            _velocityDampingUp = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingUp", "Q-Up", 20f);
+            _velocityDampingRight = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingRight", "Q-Right", 8f);
+            _velocityDampingForward = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingForward", "Q-Fwd", 8f);
+            _velocityDampingTwist = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingTwist", "Q-Twist", 8f);
+            _velocityDampingRoll = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingRoll", "Q-Roll", 8f);
+            _velocityDampingPitch = CreateVelocityDampingSlider(_damperGroup, $"MotionSource:{_keyPrefix}:VelocityDampingPitch", "Q-Pitch", 8f);
             _damperGroup.CreateSpacer(8f);
-            _damperGroup.CreateDisabledButton("Target Smoothing", new Color(1.0f, 1.0f, 1.0f, 0.075f), Color.white);
-            _targetSmoothingUp = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingUp", "Up", LegacyDamperPercentToSmoothingTime(0.2f));
-            _targetSmoothingRight = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingRight", "Right", LegacyDamperPercentToSmoothingTime(0.08f));
-            _targetSmoothingForward = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingForward", "Forward", LegacyDamperPercentToSmoothingTime(0.08f));
-            _targetSmoothingTwist = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingTwist", "Twist", LegacyDamperPercentToSmoothingTime(0.08f));
-            _targetSmoothingRoll = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingRoll", "Roll", LegacyDamperPercentToSmoothingTime(0.08f));
-            _targetSmoothingPitch = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingPitch", "Pitch", LegacyDamperPercentToSmoothingTime(0.08f));
+            // Target Smoothing disabled per spec: only spring-damper should be retained.
+            //_damperGroup.CreateDisabledButton("Target Smoothing", new Color(1.0f, 1.0f, 1.0f, 0.075f), Color.white);
+            //_targetSmoothingUp = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingUp", "Up", LegacyDamperPercentToSmoothingTime(0.2f));
+            //_targetSmoothingRight = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingRight", "Right", LegacyDamperPercentToSmoothingTime(0.08f));
+            //_targetSmoothingForward = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingForward", "Forward", LegacyDamperPercentToSmoothingTime(0.08f));
+            //_targetSmoothingTwist = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingTwist", "Twist", LegacyDamperPercentToSmoothingTime(0.08f));
+            //_targetSmoothingRoll = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingRoll", "Roll", LegacyDamperPercentToSmoothingTime(0.08f));
+            //_targetSmoothingPitch = CreateSmoothingTimeSlider(_damperGroup, $"MotionSource:{_keyPrefix}:TargetSmoothingPitch", "Pitch", LegacyDamperPercentToSmoothingTime(0.08f));
 
             RefreshVisibility();
             RefreshReferencePointEmptyChoices();
@@ -257,6 +307,7 @@ namespace ToySerialController.MotionSource
             _restGroup = null;
             _compensationGroup = null;
             _followGroup = null;
+            _speedFieldGroup = null;
             _springGroup = null;
             _damperGroup = null;
             _drivenTitle = null;
@@ -302,32 +353,36 @@ namespace ToySerialController.MotionSource
             if (_targetUp.sqrMagnitude < 1e-8f || _targetForward.sqrMagnitude < 1e-8f)
                 return;
 
-            var targetRotation = Quaternion.LookRotation(_targetForward, _targetUp);
+            _targetRotation = Quaternion.LookRotation(_targetForward, _targetUp);
             var personTarget = _currentPersonTarget;
             UpdateReferencePoint(target);
 
             if (!_initialized)
             {
-                Initialize(targetRotation);
+                Initialize(_targetRotation);
             }
             else
             {
                 if (personTarget != null && personTarget.ConsumeSelectionChanged())
                 {
                     ResetReferencePointToDefault(personTarget);
-                    Initialize(targetRotation);
+                    Initialize(_targetRotation);
                 }
                 else
                 {
                     float dt = Mathf.Clamp(Time.deltaTime, 0.001f, 0.1f);
                     Vector3 tpDeltaPos = _targetPosition - _prevTargetPosition;
-                    Quaternion tpDeltaRot = targetRotation * Quaternion.Inverse(_prevTargetRotation);
-                    UpdatePositionAndRotation(targetRotation, tpDeltaPos, tpDeltaRot, dt);
+                    Quaternion tpDeltaRot = _targetRotation * Quaternion.Inverse(_prevTargetRotation);
+                    UpdatePositionAndRotation(_targetRotation, tpDeltaPos, tpDeltaRot, dt);
                 }
             }
 
             _prevTargetPosition = _targetPosition;
-            _prevTargetRotation = targetRotation;
+            _prevTargetRotation = _targetRotation;
+
+            // Phase 2: compute speed-field velocity bias and apply it to Pe.
+            if (_speedFieldEnabled != null && _speedFieldEnabled.val)
+                ApplySpeedFieldBias(Mathf.Clamp(Time.deltaTime, 0.001f, 0.1f));
 
             if (Enabled)
             {
@@ -335,6 +390,7 @@ namespace ToySerialController.MotionSource
                 if (ctrl != null) WriteToController(ctrl);
             }
 
+            UpdateSpeedFieldDebugText();
             DrawDebug();
         }
 
@@ -424,8 +480,9 @@ namespace ToySerialController.MotionSource
             _debugOffset0TargetPosition = springFramePosition + springFrameRotation * restLocalPosition;
             _debugOffset0TargetRotation = springFrameRotation * restLocalRotation;
 
-            springTargetLocalPosition = SmoothSpringTargetPosition(springTargetLocalPosition, dt);
-            springTargetLocalEuler = SmoothSpringTargetEuler(springTargetLocalEuler, dt);
+            // Target Smoothing disabled per spec: spring target is used directly.
+            //springTargetLocalPosition = SmoothSpringTargetPosition(springTargetLocalPosition, dt);
+            //springTargetLocalEuler = SmoothSpringTargetEuler(springTargetLocalEuler, dt);
 
             Vector3 springTargetWorldPosition = springFramePosition + springFrameRotation * springTargetLocalPosition;
             Quaternion springTargetWorldRotation = springFrameRotation * Quaternion.Euler(springTargetLocalEuler);
@@ -480,14 +537,276 @@ namespace ToySerialController.MotionSource
             _debugOffset01TargetRotation = _referenceRotation;
             _vrLinearVelocity = Vector3.zero;
             _vrAngularVelocity = Vector3.zero;
-            _smoothedSpringTargetLocalPosition = restLocalPosition;
-            _smoothedSpringTargetLocalEuler = restLocalEuler;
-            _smoothedSpringTargetInitialized = true;
+            // Target Smoothing disabled per spec.
+            //_smoothedSpringTargetLocalPosition = restLocalPosition;
+            //_smoothedSpringTargetLocalEuler = restLocalEuler;
+            //_smoothedSpringTargetInitialized = true;
 
             _prevTargetPosition = _targetPosition;
             _prevTargetRotation = targetRotation;
 
+            // Phase 2: reset the speed-field state on init.
+            _fieldInitialized = false;
+            _fieldLastTime = Time.time;
+            for (int i = 0; i < 6; i++)
+            {
+                _fieldRx[i] = 0f;
+                _fieldEd[i] = 1f;
+                _fieldEu[i] = 0f;
+                _fieldLastVelocityInQ[i] = 0f;
+            }
+
             _initialized = true;
+        }
+
+        // Phase 2: compute and apply the speed-field velocity bias to Pe.
+        // 6 independent dimensions (3 position, 3 rotation), all expressed in Q's local frame.
+        // The bias is a velocity offset: in absence of external forces, v_new = v_old * weight,
+        // keeping the "velocity * weight = constant" semantics. We integrate the velocity bias
+        // over the frame to produce a position offset and apply it to Pe.
+        private void ApplySpeedFieldBias(float dt)
+        {
+            if (_reference == null) return;
+            if (_targetUp.sqrMagnitude < 1e-8f || _targetForward.sqrMagnitude < 1e-8f) return;
+
+            var targetRotationInv = Quaternion.Inverse(_targetRotation);
+            var piWorld = _reference.InsertionPoint;
+            var piInQ = targetRotationInv * (piWorld - _targetPosition);
+            var piRotInQ = targetRotationInv * _reference.InsertionRotation;
+            var piEulerInQ = SignedEuler(piRotInQ);
+
+            var yInQ = targetRotationInv * (_debugOffset01TargetPosition - _targetPosition);
+            // Y rotation expressed in Q's local frame (matching position convention)
+            var yRotInQ = targetRotationInv * _debugOffset01TargetRotation;
+            var yEulerInQ = SignedEuler(yRotInQ);
+
+            if (!_fieldInitialized)
+            {
+                _fieldLastPiWorldPos = piWorld;
+                _fieldLastPiWorldRot = _reference.InsertionRotation;
+                _fieldLastQPosition = _targetPosition;
+                _fieldLastQRotation = _targetRotation;
+                _fieldLastTime = Time.time;
+                _fieldInitialized = true;
+                for (int i = 0; i < 6; i++) { _fieldLastWeight[i] = 1f; _fieldWasActive[i] = false; }
+                return;
+            }
+
+            float actualDt = Mathf.Max(1e-4f, Time.time - _fieldLastTime);
+            _fieldLastTime = Time.time;
+
+            float length = ReferenceLength;
+
+            // S-space per-dimension upper/lower bounds (re-using RestPosition ranges).
+            //   Position:  X (right) in [-L, L],  Y (up) in [-L, 0]  (post UpDown swap),
+            //             Z (fwd) in [-L, L]
+            //   Rotation:  pitch/twist/roll in [-180, 180]
+            var posMu = new Vector3(length, 0f, length);
+            var posMl = new Vector3(-length, -length, -length);
+            const float rotMu = 180f;
+            const float rotMl = -180f;
+
+            float esp = _espSlider != null ? Mathf.Clamp(_espSlider.val, 0f, 0.5f) : 0.1f;
+
+            // Accumulate position and rotation bias in Q frame.
+            var biasPos = Vector3.zero;
+            var biasEuler = Vector3.zero;
+
+            for (int dim = 0; dim < 6; dim++)
+            {
+                float x, y, mu, ml;
+                if (dim < 3)
+                {
+                    x = piInQ[dim];
+                    y = yInQ[dim];
+                    mu = posMu[dim];
+                    ml = posMl[dim];
+                }
+                else
+                {
+                    int r = dim - 3;
+                    x = piEulerInQ[r];
+                    y = yEulerInQ[r];
+                    mu = rotMu;
+                    ml = rotMl;
+                }
+
+                // M = upper bound if X ≥ Y (same side), lower bound if X < Y.
+                var m = x >= y ? mu : ml;
+
+                // R[X] = (X - Y) / (M - Y) clamped to [0, 1]
+                float rx;
+                if (Mathf.Abs(m - y) < 1e-6f) rx = 0f;
+                else rx = Mathf.Clamp01((x - y) / (m - y));
+                _fieldRx[dim] = rx;
+
+                // Ed[X] = 1 - ln(1 - R[X])
+                // Clamp rx into (0, 1) so log is finite.
+                float rxSafe = Mathf.Clamp(rx, 1e-4f, 1f - 1e-4f);
+                float ed = 1f - Mathf.Log(1f - rxSafe);
+                _fieldEd[dim] = ed;
+
+                // Eu[X] = sqrt(1 - (R[X]*(1-Esp))^2), clamped to [Esp, 1]
+                float t = Mathf.Clamp01(rx * (1f - esp));
+                float eu = Mathf.Clamp(Mathf.Sqrt(Mathf.Max(0f, 1f - t * t)), esp, 1f);
+                _fieldEu[dim] = eu;
+
+                // Compute all 6-dim velocities once at dim==0 using world-space subtraction.
+                // vRel[dim] = vPi_world[dim] - vQ_world[dim] expressed in Q's local frame.
+                if (dim == 0)
+                {
+                    // --- Position velocities ---
+                    Vector3 vPiWorld = (piWorld - _fieldLastPiWorldPos) / actualDt;
+                    _fieldLastPiWorldPos = piWorld;
+                    Vector3 vQWorld = (_targetPosition - _fieldLastQPosition) / actualDt;
+                    _fieldLastQPosition = _targetPosition;
+                    Vector3 vRelPosInQ = targetRotationInv * (vPiWorld - vQWorld);
+                    _vRelBuf[0] = vRelPosInQ.x;
+                    _vRelBuf[1] = vRelPosInQ.y;
+                    _vRelBuf[2] = vRelPosInQ.z;
+
+                    // --- Angular velocities ---
+                    // Pi angular velocity (deg/s) in world
+                    Quaternion piRotDelta = _reference.InsertionRotation * Quaternion.Inverse(_fieldLastPiWorldRot);
+                    float piAngDeg; Vector3 piAngAxis;
+                    piRotDelta.ToAngleAxis(out piAngDeg, out piAngAxis);
+                    if (piAngDeg > 180f) piAngDeg -= 360f;
+                    Vector3 vPiAngWorld = float.IsNaN(piAngAxis.x) ? Vector3.zero
+                        : piAngAxis.normalized * (piAngDeg / actualDt);
+                    _fieldLastPiWorldRot = _reference.InsertionRotation;
+
+                    // Q angular velocity (deg/s) in world
+                    Quaternion qRotDelta = _targetRotation * Quaternion.Inverse(_fieldLastQRotation);
+                    float qAngDeg; Vector3 qAngAxis;
+                    qRotDelta.ToAngleAxis(out qAngDeg, out qAngAxis);
+                    if (qAngDeg > 180f) qAngDeg -= 360f;
+                    Vector3 vQAngWorld = float.IsNaN(qAngAxis.x) ? Vector3.zero
+                        : qAngAxis.normalized * (qAngDeg / actualDt);
+                    _fieldLastQRotation = _targetRotation;
+
+                    Vector3 vRelAngInQ = targetRotationInv * (vPiAngWorld - vQAngWorld);
+                    _vRelBuf[3] = vRelAngInQ.x;
+                    _vRelBuf[4] = vRelAngInQ.y;
+                    _vRelBuf[5] = vRelAngInQ.z;
+                }
+
+                float vPiInQ = _vRelBuf[dim];
+
+                // Current direction: toward M or toward Y.
+                var signX = (Mathf.Abs(m - y) < 1e-6f) ? 0f : Mathf.Sign(m - y);
+                var signV = (Mathf.Abs(vPiInQ) < 1e-6f) ? 0f : Mathf.Sign(vPiInQ);
+                var movingToM = signX != 0f && signV != 0f && signX == signV;
+                var dir = movingToM ? 1 : -1;
+
+                // Store measured velocity for debug before any modification.
+                _fieldLastVelocityInQ[dim] = vPiInQ;
+
+                // Weight at current position for current direction.
+                float wCurr = movingToM ? ed : eu;
+
+                // Toggle check: disabled → reset history, no bias.
+                bool toggledOff = false;
+                if (movingToM)
+                {
+                    if (dim < 3 && _speedFieldPosLossEnabled != null && !_speedFieldPosLossEnabled.val) toggledOff = true;
+                    if (dim >= 3 && _speedFieldRotLossEnabled != null && !_speedFieldRotLossEnabled.val) toggledOff = true;
+                }
+                else
+                {
+                    if (dim < 3 && _speedFieldPosGainEnabled != null && !_speedFieldPosGainEnabled.val) toggledOff = true;
+                    if (dim >= 3 && _speedFieldRotGainEnabled != null && !_speedFieldRotGainEnabled.val) toggledOff = true;
+                }
+                if (toggledOff)
+                {
+                    _fieldLastWeight[dim] = 1f;
+                    _fieldWasActive[dim] = false;
+                    _fieldBiasVelocityInQ[dim] = 0f;
+                    if (dim < 3) biasPos[dim] = 0f;
+                    else biasEuler[dim - 3] = 0f;
+                    continue;
+                }
+
+                // Boundary check: Pi at/past bound.
+                bool atBoundary = signX != 0f && ((signX > 0f && x >= mu) || (signX < 0f && x <= ml));
+
+                // Compute v_new (desired Pi velocity in Q frame) using double precision.
+                double vNew;
+
+                if (!_fieldWasActive[dim])
+                {
+                    // First active frame → pass through, no conservation yet.
+                    vNew = vPiInQ;
+                    _fieldLastWeight[dim] = wCurr;
+                }
+                else if (_fieldLastMovingToM[dim] != movingToM)
+                {
+                    // Direction switch → velocity unchanged, start new weight chain.
+                    vNew = vPiInQ;
+                    _fieldLastWeight[dim] = wCurr;
+                }
+                else if (atBoundary)
+                {
+                    if (movingToM)
+                    {
+                        // Outward at boundary → infinite loss, full stop.
+                        vNew = 0.0;
+                    }
+                    else
+                    {
+                        // Inward at boundary → Eu ratio 0.99 (mild acceleration).
+                        vNew = vPiInQ / 0.99;
+                    }
+                    _fieldLastWeight[dim] = wCurr;
+                }
+                else
+                {
+                    // Normal conservation: v_new * wCurr = v_old * wPrev
+                    double wPrev = _fieldLastWeight[dim];
+                    vNew = vPiInQ * wPrev / Mathf.Max(wCurr, 1e-6f);
+                    _fieldLastWeight[dim] = wCurr;
+                }
+
+                _fieldLastMovingToM[dim] = movingToM;
+                _fieldWasActive[dim] = true;
+
+                double biasV = vNew - vPiInQ;
+                _fieldBiasVelocityInQ[dim] = (float)biasV;
+                _fieldNewVelocityInQ[dim] = (float)vNew;
+
+                if (dim < 3) biasPos[dim] = (float)(biasV * actualDt);
+                else biasEuler[dim - 3] = (float)(biasV * actualDt);
+            }
+
+            // Store Q frame and bias for next frame's velocity computation.
+            _fieldLastQPosition = _targetPosition;
+            _fieldLastQRotation = _targetRotation;
+            _fieldBiasPos = biasPos;
+            _fieldBiasEuler = biasEuler;
+
+            // Convert Q-frame bias into world space and apply to Pe.
+            if (UsesEngineHoldSpring)
+            {
+                if (biasPos.sqrMagnitude > 1e-12f)
+                    _controllerTargetPosition += _targetRotation * biasPos;
+                if (biasEuler.sqrMagnitude > 1e-12f)
+                {
+                    // Rotation bias applied as a delta in Q-frame, then composed.
+                    var biasRotQuat = Quaternion.Euler(biasEuler);
+                    var biasRotWorld = _targetRotation * biasRotQuat;
+                    _controllerTargetRotation = NormalizeQuaternion(biasRotWorld * _controllerTargetRotation);
+                }
+            }
+            else
+            {
+                if (biasPos.sqrMagnitude > 1e-12f)
+                    _referencePosition += _targetRotation * biasPos;
+                if (biasEuler.sqrMagnitude > 1e-12f)
+                {
+                    var biasRotQuat = Quaternion.Euler(biasEuler);
+                    var biasRotWorld = _targetRotation * biasRotQuat;
+                    _referenceRotation = NormalizeQuaternion(biasRotWorld * _referenceRotation);
+                }
+            }
         }
 
         private void WriteToController(FreeControllerV3 ctrl)
@@ -518,6 +837,31 @@ namespace ToySerialController.MotionSource
             ctrl.transform.rotation = controllerRotation;
         }
 
+        private bool GetActualControllerPose(out Vector3 position, out Quaternion rotation)
+        {
+            position = Vector3.zero;
+            rotation = Quaternion.identity;
+
+            var ctrl = _reference?.DrivenAtom?.mainController;
+            if (ctrl == null) return false;
+
+            if (UsesEngineHoldSpring && ctrl.control != null)
+            {
+                position = ctrl.control.position;
+                rotation = ctrl.control.rotation;
+                return true;
+            }
+
+            if (ctrl.transform != null)
+            {
+                position = ctrl.transform.position;
+                rotation = ctrl.transform.rotation;
+                return true;
+            }
+
+            return false;
+        }
+
         private Quaternion GetControllerRestOffset()
         {
             var kind = _reference != null ? _reference.DrivenKind : null;
@@ -533,28 +877,223 @@ namespace ToySerialController.MotionSource
 
             DebugDraw.DrawTransform(_targetPosition, _targetUp, _targetRight, _targetForward, 0.12f);
 
-            // Final attracted position: Qp for Dildo/CUA, physics position for Empty
-            var finalDebugPos = UsesEngineHoldSpring ? _debugFinalTargetPosition : _referencePosition;
-            var finalDebugRot = UsesEngineHoldSpring ? _debugFinalTargetRotation : _referenceRotation;
-            DebugDraw.DrawLine(finalDebugPos, _targetPosition, Color.white);
-
             var referencePointUp = _referencePointRotation * Vector3.up;
             var referencePointRight = _referencePointRotation * Vector3.right;
             var referencePointForward = _referencePointRotation * Vector3.forward;
             DebugDraw.DrawPoint(_referencePointPosition, Color.cyan, 0.012f);
             DebugDraw.DrawTransform(_referencePointPosition, referencePointUp, referencePointRight, referencePointForward, 0.06f);
 
-            // Red: rest offset only (no compensation)
-            DebugDraw.DrawPoint(_debugOffset0TargetPosition, Color.red, 0.01f);
-            DebugDraw.DrawTransform(_debugOffset0TargetPosition, _debugOffset0TargetRotation * Vector3.up, _debugOffset0TargetRotation * Vector3.right, _debugOffset0TargetRotation * Vector3.forward, 0.08f);
-
-            // Yellow: rest + displacement compensation
+            // Yellow: rest + displacement compensation (draw FIRST so red covers it)
             DebugDraw.DrawPoint(_debugOffset01TargetPosition, Color.yellow, 0.01f);
             DebugDraw.DrawTransform(_debugOffset01TargetPosition, _debugOffset01TargetRotation * Vector3.up, _debugOffset01TargetRotation * Vector3.right, _debugOffset01TargetRotation * Vector3.forward, 0.1f);
 
-            // Green: final attracted position
-            DebugDraw.DrawPoint(finalDebugPos, Color.green, 0.012f);
-            DebugDraw.DrawTransform(finalDebugPos, finalDebugRot * Vector3.up, finalDebugRot * Vector3.right, finalDebugRot * Vector3.forward, 0.12f);
+            // Red: rest offset only (no compensation) - drawn AFTER yellow so always visible
+            DebugDraw.DrawPoint(_debugOffset0TargetPosition, Color.red, 0.015f);
+            DebugDraw.DrawTransform(_debugOffset0TargetPosition, _debugOffset0TargetRotation * Vector3.up, _debugOffset0TargetRotation * Vector3.right, _debugOffset0TargetRotation * Vector3.forward, 0.08f);
+
+            // Green: actual controller position (read from live transform, not computed target)
+            Vector3 actualCtrlPos = Vector3.zero;
+            Quaternion actualCtrlRot = Quaternion.identity;
+            if (GetActualControllerPose(out actualCtrlPos, out actualCtrlRot))
+            {
+                DebugDraw.DrawLine(actualCtrlPos, _targetPosition, Color.white);
+                DebugDraw.DrawPoint(actualCtrlPos, Color.green, 0.015f);
+                DebugDraw.DrawTransform(actualCtrlPos, actualCtrlRot * Vector3.up, actualCtrlRot * Vector3.right, actualCtrlRot * Vector3.forward, 0.12f);
+            }
+
+            // Phase 2: Blue/Purple/White arrows
+            DrawNewArrows(actualCtrlPos);
+        }
+
+        // Phase 2 additions: draw the blue (B), purple (gain/loss) and white (velocity follow) arrows
+        // for IDrivableReference types (Dildo, CUA, Empty). MaleReference / AnimationMotionSource
+        // do not participate and fall back to the original mechanism.
+        private void DrawNewArrows(Vector3 finalAttractorWorld)
+        {
+            if (_reference == null) return;
+
+            // Blue arrow B (Bs->Be) is the spring-blended ideal attract for Pi (insertion part).
+            // It is purely visual; the actual spring target for Pc remains the green G.
+            //   Q[Bs] = O  (i.e. world position of the target Q)
+            //   Q[Be] = LerpUnclamped(Q[Pi], Q[Y], Spring)   in Q's local frame
+            var blueBeWorld = ComputeBlueArrowEnd();
+
+            // Pi in world for arrow origins
+            var piWorld = _reference.InsertionPoint;
+
+            DebugDraw.DrawLine(_targetPosition, blueBeWorld, Color.blue);
+            DebugDraw.DrawPoint(blueBeWorld, Color.blue, 0.008f);
+            DebugDraw.DrawPoint(piWorld, new Color(0.6f, 0.7f, 1f, 0.9f), 0.006f); // pale blue for Pi itself
+
+            DrawPurpleArrows();
+
+            if (IsVelocityFollowEnabled)
+                DrawWhiteArrow(piWorld);
+        }
+
+        // Returns the world-space Be of the blue arrow: Q[Be] = LerpUnclamped(Q[Pi], Q[Y], Spring).
+        private Vector3 ComputeBlueArrowEnd()
+        {
+            var springRight = GetBlendValue(_springRight);
+            var springUp = GetBlendValue(_springUp);
+            var springFwd = GetBlendValue(_springForward);
+            var springYaw = GetBlendValue(_springTwist);
+            var springRoll = GetBlendValue(_springRoll);
+            var springPitch = GetBlendValue(_springPitch);
+
+            // Express Pi in Q's local frame.
+            var targetRotationInv = Quaternion.Inverse(_targetRotation);
+            var piWorld = _reference.InsertionPoint;
+            var piInQ = targetRotationInv * (piWorld - _targetPosition);
+
+            // Express Y in Q's local frame.
+            var yInQ = targetRotationInv * (_debugOffset01TargetPosition - _targetPosition);
+
+            // Q[Be] = LerpUnclamped(Q[Pi], Q[Y], Spring)  (position 3-dim)
+            var bePosInQ = new Vector3(
+                Mathf.LerpUnclamped(piInQ.x, yInQ.x, springRight),
+                Mathf.LerpUnclamped(piInQ.y, yInQ.y, springUp),
+                Mathf.LerpUnclamped(piInQ.z, yInQ.z, springFwd)
+            );
+
+            // Rotation part: blend the rotation of Pi toward Y in Q frame.
+            var piRotInQ = targetRotationInv * _reference.InsertionRotation;
+            var yRotInQ = _debugOffset01TargetRotation;
+            var beRotInQ = Quaternion.Slerp(piRotInQ, yRotInQ, (springYaw + springRoll + springPitch) / 3f);
+
+            // Lift Be into world by treating Q[Bs]=O as the world target.
+            var beWorld = _targetPosition + _targetRotation * bePosInQ;
+            // Rotation portion is informational; we don't currently apply it to Pc, but we keep
+            // the visualizable endpoint as a position for the arrow line.
+            return beWorld;
+        }
+
+        // Purple arrow (dE/dt) from Pi, unit 5cm.
+        // Per position-dimension: gain (moving toward Y) → point toward M; loss → point toward Y.
+        private void DrawPurpleArrows()
+        {
+            if (_reference == null) return;
+
+            var piWorld = _reference.InsertionPoint;
+            var targetRotationInv = Quaternion.Inverse(_targetRotation);
+            var piInQ = targetRotationInv * (piWorld - _targetPosition);
+            var yInQ = targetRotationInv * (_debugOffset01TargetPosition - _targetPosition);
+
+            float length = ReferenceLength;
+            var mu = new Vector3(length, 0f, length);
+            var ml = new Vector3(-length, -length, -length);
+
+            var combined = Vector3.zero;
+            bool any = false;
+
+            for (int dim = 0; dim < 3; dim++)
+            {
+                var x = piInQ[dim];
+                var y = yInQ[dim];
+                var upper = mu[dim];
+                var lower = ml[dim];
+
+                var m = x >= y ? upper : lower;
+
+                float rx;
+                if (Mathf.Abs(m - y) < 1e-6f) rx = 0f;
+                else rx = Mathf.Clamp01((x - y) / (m - y));
+
+                if (rx <= 0.001f) continue;
+
+                var vPiInQ = _fieldLastVelocityInQ[dim];
+                var signX = Mathf.Sign(m - y);
+                var signV = Mathf.Abs(vPiInQ) < 1e-6f ? 0f : Mathf.Sign(vPiInQ);
+                var movingToM = signX != 0f && signV != 0f && signX == signV;
+
+                // gain (toward Y) → point to M; loss (toward M) → point to Y
+                var arrowDir = movingToM ? -signX : signX;
+                if (arrowDir == 0f) arrowDir = signX;
+
+                combined[dim] = arrowDir * 0.05f;
+                any = true;
+            }
+
+            if (!any) return;
+
+            var arrowWorld = piWorld + _targetRotation * combined;
+            DebugDraw.DrawLine(piWorld, arrowWorld, Color.magenta);
+        }
+
+        // White arrow W (velocity follow) from Pi, unit: 1 cm/s = 1 cm drawn length.
+        private void DrawWhiteArrow(Vector3 originWorld)
+        {
+            var prevTpRot = _prevTargetRotation;
+            var deltaPos = _targetPosition - _prevTargetPosition;
+            var deltaLocal = Quaternion.Inverse(prevTpRot) * deltaPos;
+
+            var followLocal = new Vector3(
+                deltaLocal.x * _followRightFactor.val,
+                deltaLocal.y * _followUpFactor.val,
+                deltaLocal.z * _followForwardFactor.val
+            );
+            if (followLocal.sqrMagnitude < 1e-12f) return;
+
+            var followWorld = _targetRotation * followLocal * 100f;
+            DebugDraw.DrawLine(originWorld, originWorld + followWorld, Color.white);
+        }
+
+        private void UpdateSpeedFieldDebugText()
+        {
+            if (_speedFieldDebugText == null || _reference == null) return;
+
+            if (!_fieldInitialized)
+            {
+                _speedFieldDebugText.val = "Speed Field: not initialized";
+                return;
+            }
+
+            var targetRotationInv = Quaternion.Inverse(_targetRotation);
+            var piWorld = _reference.InsertionPoint;
+            var piInQ = targetRotationInv * (piWorld - _targetPosition);
+            var piRotWorld = _reference.InsertionRotation;
+            var piEulerInQ = SignedEuler(targetRotationInv * piRotWorld);
+            var yInQ = targetRotationInv * (_debugOffset01TargetPosition - _targetPosition);
+            var yRotInQ = targetRotationInv * _debugOffset01TargetRotation;
+            var yEulerInQ = SignedEuler(yRotInQ);
+
+            float length = ReferenceLength;
+            var posMu = new Vector3(length, 0f, length);
+            var posMl = new Vector3(-length, -length, -length);
+            const float rotMu = 180f;
+            const float rotMl = -180f;
+
+            string[] dimLabels = { "Rgt", "Up ", "Fwd", "Pit", "Twst", "Rol" };
+            var lines = new System.Collections.Generic.List<string>();
+            lines.Add($"Pi in Q: ({piInQ.x:F3}, {piInQ.y:F3}, {piInQ.z:F3})  euler({piEulerInQ.x:F1}, {piEulerInQ.y:F1}, {piEulerInQ.z:F1})");
+            lines.Add($"Y  in Q: ({yInQ.x:F3}, {yInQ.y:F3}, {yInQ.z:F3})  euler({yEulerInQ.x:F1}, {yEulerInQ.y:F1}, {yEulerInQ.z:F1})");
+            lines.Add("");
+
+            for (int dim = 0; dim < 6; dim++)
+            {
+                float x, y, mu, ml;
+                if (dim < 3)
+                {
+                    x = piInQ[dim]; y = yInQ[dim]; mu = posMu[dim]; ml = posMl[dim];
+                }
+                else
+                {
+                    int r = dim - 3;
+                    x = piEulerInQ[r]; y = yEulerInQ[r]; mu = rotMu; ml = rotMl;
+                }
+
+                var m = x >= y ? mu : ml;
+                float rx = (Mathf.Abs(m - y) < 1e-6f) ? 0f : Mathf.Clamp01((x - y) / (m - y));
+                var ed = _fieldEd[dim];
+                var eu = _fieldEu[dim];
+                var vPiInQ = _fieldLastVelocityInQ[dim];
+                var vNew = _fieldNewVelocityInQ[dim];
+                var biasV = _fieldBiasVelocityInQ[dim];
+
+                lines.Add($"{dimLabels[dim]}: R={rx:F3}  Ed={ed:F2}  Eu={eu:F2}  vPinQ={vPiInQ:F3}  vNew={vNew:F3}  biasV={biasV:F3}");
+            }
+
+            _speedFieldDebugText.val = string.Join("\n", lines.ToArray());
         }
 
         private void UpdateReferencePoint(IMotionSourceTarget target)
@@ -676,7 +1215,10 @@ namespace ToySerialController.MotionSource
         private float GetRestUpFactor()
         {
             float insertion = _restUpSlider?.val ?? 0.5f;
-            return insertion - 1f;
+            // Slider UpDown swap: 0 = fully out (external, y=0), 1 = fully in (internal, y=-length).
+            // Range stays [-length, 0] in Q's local frame, same as before; only the slider
+            // labels 0% / 100% are interpreted oppositely.
+            return -insertion;
         }
 
         private Vector3 GetRestLocalEuler()
@@ -691,7 +1233,7 @@ namespace ToySerialController.MotionSource
         private JSONStorableFloat CreateSpringSlider(UIGroup group, string key, string label, float defaultValue)
         {
             if (UsesPercentSpringUnits)
-                return group.CreateSlider(key, label + " (%)", defaultValue, 0f, 2f, true, true, valueFormat: "P0");
+                return group.CreateSlider(key, label + " (%)", defaultValue, 0f, 1f, true, true, valueFormat: "P0");
 
             bool angular = label.Contains("Twist") || label.Contains("Roll") || label.Contains("Pitch");
             return group.CreateSlider(key, angular ? label + " (deg/s²)" : label + " (m/s²)", defaultValue, 0f, 200f, true, true, valueFormat: "F1");
@@ -858,11 +1400,12 @@ namespace ToySerialController.MotionSource
                 );
             }
 
+            // Target Smoothing disabled per spec: spring target is used directly.
             // Smooth ONLY the target (rest+compensation). Smoothing must not be applied to the qe term;
             // otherwise at Spring=0 the resulting qpLocal lags behind the moving person frame and the engine
             // hold spring drags the dildo along with the person (apparent constant-velocity drift).
-            targetLocalPosition = SmoothSpringTargetPosition(targetLocalPosition, dt);
-            targetLocalEuler = SmoothSpringTargetEuler(targetLocalEuler, dt);
+            //targetLocalPosition = SmoothSpringTargetPosition(targetLocalPosition, dt);
+            //targetLocalEuler = SmoothSpringTargetEuler(targetLocalEuler, dt);
 
             var targetReferenceRotation = NormalizeQuaternion(targetRotation * Quaternion.Euler(targetLocalEuler));
 
@@ -886,9 +1429,29 @@ namespace ToySerialController.MotionSource
                 LerpAngleUnclamped(qeLocalEuler.z, targetLocalEuler.z, GetBlendValue(_springRoll))
             );
 
-            Vector3 qpLocalPosition = _speedFilterEnabled != null && _speedFilterEnabled.val
-                ? ApplySpeedFilterToSpringTarget(rawSpringTargetLocalPosition, length, dt)
-                : rawSpringTargetLocalPosition;
+            // Speed Filter disabled per spec: spring target is used directly.
+            //Vector3 qpLocalPosition = _speedFilterEnabled != null && _speedFilterEnabled.val
+            //    ? ApplySpeedFilterToSpringTarget(rawSpringTargetLocalPosition, length, dt)
+            //    : rawSpringTargetLocalPosition;
+            Vector3 qpLocalPosition = rawSpringTargetLocalPosition;
+
+            // Velocity follow: lerp qpLocal toward previous by factor k per dimension.
+            // k=1 → Pi stationary in Q frame (qp doesn't change); k=0 → no effect.
+            if (IsVelocityFollowEnabled && _initialized)
+            {
+                qpLocalPosition = new Vector3(
+                    Mathf.Lerp(qpLocalPosition.x, _prevPiInQpLocalPosition.x, _followRightFactor.val),
+                    Mathf.Lerp(qpLocalPosition.y, _prevPiInQpLocalPosition.y, _followUpFactor.val),
+                    Mathf.Lerp(qpLocalPosition.z, _prevPiInQpLocalPosition.z, _followForwardFactor.val)
+                );
+                qpLocalEuler = new Vector3(
+                    Mathf.Lerp(qpLocalEuler.x, _prevPiInQpLocalEuler.x, _followPitchFactor.val),
+                    Mathf.Lerp(qpLocalEuler.y, _prevPiInQpLocalEuler.y, _followTwistFactor.val),
+                    Mathf.Lerp(qpLocalEuler.z, _prevPiInQpLocalEuler.z, _followRollFactor.val)
+                );
+            }
+            _prevPiInQpLocalPosition = qpLocalPosition;
+            _prevPiInQpLocalEuler = qpLocalEuler;
 
             _debugFinalTargetPosition = _targetPosition + targetRotation * qpLocalPosition;
             _debugFinalTargetRotation = NormalizeQuaternion(targetRotation * Quaternion.Euler(qpLocalEuler));
@@ -1051,15 +1614,13 @@ namespace ToySerialController.MotionSource
 
         private void OnSpeedFilterChanged(bool _)
         {
-            if (_speedFilterEnabled != null && _speedFilterEnabled.val && _velocityFollowEnabled != null && _velocityFollowEnabled.val)
-                _velocityFollowEnabled.valNoCallback = false;
+            // Speed Filter disabled per spec; method retained for config-key compatibility.
             ResetVelocityModeStates();
         }
 
         private void OnVelocityFollowChanged(bool _)
         {
-            if (_velocityFollowEnabled != null && _velocityFollowEnabled.val && _speedFilterEnabled != null && _speedFilterEnabled.val)
-                _speedFilterEnabled.valNoCallback = false;
+            // Speed Filter is disabled; no mutual-exclusion side effect to handle.
             ResetVelocityModeStates();
         }
 
@@ -1205,6 +1766,12 @@ namespace ToySerialController.MotionSource
             RefreshVisibility();
         }
 
+        private void ToggleSpeedFieldVisibility()
+        {
+            _speedFieldVisible = !_speedFieldVisible;
+            RefreshVisibility();
+        }
+
         private void ToggleDamperVisibility()
         {
             _damperVisible = !_damperVisible;
@@ -1213,13 +1780,14 @@ namespace ToySerialController.MotionSource
 
         private void RefreshVisibility()
         {
-            bool contentVisible = _drivenVisible && Enabled;
+            bool contentVisible = _drivenVisible; // Always show for debug
 
             _drivenGroup?.SetVisible(_drivenVisible);
             _drivenContentGroup?.SetVisible(contentVisible);
             _restGroup?.SetVisible(contentVisible && _restVisible);
             _compensationGroup?.SetVisible(contentVisible && _compensationVisible);
             _followGroup?.SetVisible(contentVisible && _followVisible);
+            _speedFieldGroup?.SetVisible(contentVisible && _speedFieldVisible);
             _springGroup?.SetVisible(contentVisible && _springVisible);
             _damperGroup?.SetVisible(contentVisible && _damperVisible);
         }
