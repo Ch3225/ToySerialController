@@ -777,9 +777,7 @@ namespace ToySerialController.MotionSource
                 else biasEuler[dim - 3] = (float)(biasV * actualDt);
             }
 
-            // Store Q frame and bias for next frame's velocity computation.
-            _fieldLastQPosition = _targetPosition;
-            _fieldLastQRotation = _targetRotation;
+            // Store bias for debug.
             _fieldBiasPos = biasPos;
             _fieldBiasEuler = biasEuler;
 
