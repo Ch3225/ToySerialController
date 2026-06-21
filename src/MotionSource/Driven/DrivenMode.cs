@@ -121,10 +121,12 @@ namespace ToySerialController.MotionSource
         private Vector3 _prevPiInQpLocalEuler;
 
         // Phase 2: Speed-field (purple) state. Tracks Pi's last sampled pose in Q's local frame
-        // and the per-dimension velocity/weight state. Reset on init / scene change.
+        // and the per-dimension R/Ed/Eu values for the velocity-follow weights. Reset on init.
         private Vector3 _fieldLastPiWorldPos;
         private Quaternion _fieldLastPiWorldRot;
         private readonly float[] _vRelBuf = new float[6];
+        private Vector3 _fieldQWorldVelocity;          // Q's world linear velocity (m/s)
+        private Vector3 _fieldQWorldAngVelocity;       // Q's world angular velocity (deg/s)
         private Vector3 _fieldLastQPosition;
         private Quaternion _fieldLastQRotation;
         private float _fieldLastTime;
@@ -134,13 +136,6 @@ namespace ToySerialController.MotionSource
         private readonly float[] _fieldEd = new float[6];
         private readonly float[] _fieldEu = new float[6];
         private readonly float[] _fieldLastVelocityInQ = new float[6];
-        private readonly float[] _fieldBiasVelocityInQ = new float[6];
-        private readonly float[] _fieldNewVelocityInQ = new float[6];
-        private readonly float[] _fieldLastWeight = new float[6];
-        private readonly bool[] _fieldLastMovingToM = new bool[6];
-        private readonly bool[] _fieldWasActive = new bool[6];
-        private Vector3 _fieldBiasPos;
-        private Vector3 _fieldBiasEuler;
         // New UI storables
         private JSONStorableBool _speedFieldEnabled;
         private JSONStorableFloat _espSlider;
@@ -380,9 +375,8 @@ namespace ToySerialController.MotionSource
             _prevTargetPosition = _targetPosition;
             _prevTargetRotation = _targetRotation;
 
-            // Phase 2: compute speed-field velocity bias and apply it to Pe.
-            if (_speedFieldEnabled != null && _speedFieldEnabled.val)
-                ApplySpeedFieldBias(Mathf.Clamp(Time.deltaTime, 0.001f, 0.1f));
+            // Phase 2: speed-field is now folded into the velocity-follow weights inside
+            // UpdateControllerTarget. No separate pass needed.
 
             if (Enabled)
             {
@@ -547,7 +541,6 @@ namespace ToySerialController.MotionSource
 
             // Phase 2: reset the speed-field state on init.
             _fieldInitialized = false;
-            _fieldLastTime = Time.time;
             for (int i = 0; i < 6; i++)
             {
                 _fieldRx[i] = 0f;
@@ -559,27 +552,26 @@ namespace ToySerialController.MotionSource
             _initialized = true;
         }
 
-        // Phase 2: compute and apply the speed-field velocity bias to Pe.
-        // 6 independent dimensions (3 position, 3 rotation), all expressed in Q's local frame.
-        // The bias is a velocity offset: in absence of external forces, v_new = v_old * weight,
-        // keeping the "velocity * weight = constant" semantics. We integrate the velocity bias
-        // over the frame to produce a position offset and apply it to Pe.
-        private void ApplySpeedFieldBias(float dt)
+        // Phase 2: compute the per-dimension velocity-follow weights driven by Ed/Eu and the
+        // relative-velocity direction. Returns float[6] aligned to the 6 dimensions
+        // (x/y/z position, then x/y/z rotation in Q's local frame). Each weight is the lerp
+        // input for the existing velocity-follow block; the lerp itself does the work.
+        private float[] ComputeSpeedFieldWeights(Quaternion targetRotation)
         {
-            if (_reference == null) return;
-            if (_targetUp.sqrMagnitude < 1e-8f || _targetForward.sqrMagnitude < 1e-8f) return;
+            if (_reference == null) return null;
+            if (_targetUp.sqrMagnitude < 1e-8f || _targetForward.sqrMagnitude < 1e-8f) return null;
 
-            var targetRotationInv = Quaternion.Inverse(_targetRotation);
+            var targetRotationInv = Quaternion.Inverse(targetRotation);
             var piWorld = _reference.InsertionPoint;
             var piInQ = targetRotationInv * (piWorld - _targetPosition);
             var piRotInQ = targetRotationInv * _reference.InsertionRotation;
             var piEulerInQ = SignedEuler(piRotInQ);
 
             var yInQ = targetRotationInv * (_debugOffset01TargetPosition - _targetPosition);
-            // Y rotation expressed in Q's local frame (matching position convention)
             var yRotInQ = targetRotationInv * _debugOffset01TargetRotation;
             var yEulerInQ = SignedEuler(yRotInQ);
 
+            // First-frame init: nothing to compare against. Use static follow factors.
             if (!_fieldInitialized)
             {
                 _fieldLastPiWorldPos = piWorld;
@@ -588,29 +580,60 @@ namespace ToySerialController.MotionSource
                 _fieldLastQRotation = _targetRotation;
                 _fieldLastTime = Time.time;
                 _fieldInitialized = true;
-                for (int i = 0; i < 6; i++) { _fieldLastWeight[i] = 1f; _fieldWasActive[i] = false; }
-                return;
+                return new float[] {
+                    _followRightFactor.val, _followUpFactor.val, _followForwardFactor.val,
+                    _followPitchFactor.val, _followTwistFactor.val, _followRollFactor.val
+                };
             }
 
             float actualDt = Mathf.Max(1e-4f, Time.time - _fieldLastTime);
             _fieldLastTime = Time.time;
 
             float length = ReferenceLength;
-
-            // S-space per-dimension upper/lower bounds (re-using RestPosition ranges).
-            //   Position:  X (right) in [-L, L],  Y (up) in [-L, 0]  (post UpDown swap),
-            //             Z (fwd) in [-L, L]
-            //   Rotation:  pitch/twist/roll in [-180, 180]
             var posMu = new Vector3(length, 0f, length);
             var posMl = new Vector3(-length, -length, -length);
             const float rotMu = 180f;
             const float rotMl = -180f;
-
             float esp = _espSlider != null ? Mathf.Clamp(_espSlider.val, 0f, 0.5f) : 0.1f;
 
-            // Accumulate position and rotation bias in Q frame.
-            var biasPos = Vector3.zero;
-            var biasEuler = Vector3.zero;
+            // Relative velocity in Q frame (Pi relative to Q), all 6 dims at once.
+            Vector3 vPiWorld = (piWorld - _fieldLastPiWorldPos) / actualDt;
+            _fieldLastPiWorldPos = piWorld;
+            Vector3 vQWorld = (_targetPosition - _fieldLastQPosition) / actualDt;
+            _fieldLastQPosition = _targetPosition;
+            _fieldQWorldVelocity = vQWorld;
+            Vector3 vRelPosInQ = targetRotationInv * (vPiWorld - vQWorld);
+            _vRelBuf[0] = vRelPosInQ.x;
+            _vRelBuf[1] = vRelPosInQ.y;
+            _vRelBuf[2] = vRelPosInQ.z;
+
+            Quaternion piRotDelta = _reference.InsertionRotation * Quaternion.Inverse(_fieldLastPiWorldRot);
+            float piAngDeg; Vector3 piAngAxis;
+            piRotDelta.ToAngleAxis(out piAngDeg, out piAngAxis);
+            if (piAngDeg > 180f) piAngDeg -= 360f;
+            Vector3 vPiAngWorld = float.IsNaN(piAngAxis.x) ? Vector3.zero
+                : piAngAxis.normalized * (piAngDeg / actualDt);
+            _fieldLastPiWorldRot = _reference.InsertionRotation;
+
+            Quaternion qRotDelta = _targetRotation * Quaternion.Inverse(_fieldLastQRotation);
+            float qAngDeg; Vector3 qAngAxis;
+            qRotDelta.ToAngleAxis(out qAngDeg, out qAngAxis);
+            if (qAngDeg > 180f) qAngDeg -= 360f;
+            Vector3 vQAngWorld = float.IsNaN(qAngAxis.x) ? Vector3.zero
+                : qAngAxis.normalized * (qAngDeg / actualDt);
+            _fieldLastQRotation = _targetRotation;
+            _fieldQWorldAngVelocity = vQAngWorld;
+
+            Vector3 vRelAngInQ = targetRotationInv * (vPiAngWorld - vQAngWorld);
+            _vRelBuf[3] = vRelAngInQ.x;
+            _vRelBuf[4] = vRelAngInQ.y;
+            _vRelBuf[5] = vRelAngInQ.z;
+
+            var weights = new float[6];
+            var followFactors = new float[] {
+                _followRightFactor.val, _followUpFactor.val, _followForwardFactor.val,
+                _followPitchFactor.val, _followTwistFactor.val, _followRollFactor.val
+            };
 
             for (int dim = 0; dim < 6; dim++)
             {
@@ -635,13 +658,10 @@ namespace ToySerialController.MotionSource
                 var m = x >= y ? mu : ml;
 
                 // R[X] = (X - Y) / (M - Y) clamped to [0, 1]
-                float rx;
-                if (Mathf.Abs(m - y) < 1e-6f) rx = 0f;
-                else rx = Mathf.Clamp01((x - y) / (m - y));
+                float rx = Mathf.Abs(m - y) < 1e-6f ? 0f : Mathf.Clamp01((x - y) / (m - y));
                 _fieldRx[dim] = rx;
 
-                // Ed[X] = 1 - ln(1 - R[X])
-                // Clamp rx into (0, 1) so log is finite.
+                // Ed[X] = 1 - ln(1 - R[X]); saturate at 1 for the lerp formula.
                 float rxSafe = Mathf.Clamp(rx, 1e-4f, 1f - 1e-4f);
                 float ed = 1f - Mathf.Log(1f - rxSafe);
                 _fieldEd[dim] = ed;
@@ -651,160 +671,44 @@ namespace ToySerialController.MotionSource
                 float eu = Mathf.Clamp(Mathf.Sqrt(Mathf.Max(0f, 1f - t * t)), esp, 1f);
                 _fieldEu[dim] = eu;
 
-                // Compute all 6-dim velocities once at dim==0 using world-space subtraction.
-                // vRel[dim] = vPi_world[dim] - vQ_world[dim] expressed in Q's local frame.
-                if (dim == 0)
-                {
-                    // --- Position velocities ---
-                    Vector3 vPiWorld = (piWorld - _fieldLastPiWorldPos) / actualDt;
-                    _fieldLastPiWorldPos = piWorld;
-                    Vector3 vQWorld = (_targetPosition - _fieldLastQPosition) / actualDt;
-                    _fieldLastQPosition = _targetPosition;
-                    Vector3 vRelPosInQ = targetRotationInv * (vPiWorld - vQWorld);
-                    _vRelBuf[0] = vRelPosInQ.x;
-                    _vRelBuf[1] = vRelPosInQ.y;
-                    _vRelBuf[2] = vRelPosInQ.z;
-
-                    // --- Angular velocities ---
-                    // Pi angular velocity (deg/s) in world
-                    Quaternion piRotDelta = _reference.InsertionRotation * Quaternion.Inverse(_fieldLastPiWorldRot);
-                    float piAngDeg; Vector3 piAngAxis;
-                    piRotDelta.ToAngleAxis(out piAngDeg, out piAngAxis);
-                    if (piAngDeg > 180f) piAngDeg -= 360f;
-                    Vector3 vPiAngWorld = float.IsNaN(piAngAxis.x) ? Vector3.zero
-                        : piAngAxis.normalized * (piAngDeg / actualDt);
-                    _fieldLastPiWorldRot = _reference.InsertionRotation;
-
-                    // Q angular velocity (deg/s) in world
-                    Quaternion qRotDelta = _targetRotation * Quaternion.Inverse(_fieldLastQRotation);
-                    float qAngDeg; Vector3 qAngAxis;
-                    qRotDelta.ToAngleAxis(out qAngDeg, out qAngAxis);
-                    if (qAngDeg > 180f) qAngDeg -= 360f;
-                    Vector3 vQAngWorld = float.IsNaN(qAngAxis.x) ? Vector3.zero
-                        : qAngAxis.normalized * (qAngDeg / actualDt);
-                    _fieldLastQRotation = _targetRotation;
-
-                    Vector3 vRelAngInQ = targetRotationInv * (vPiAngWorld - vQAngWorld);
-                    _vRelBuf[3] = vRelAngInQ.x;
-                    _vRelBuf[4] = vRelAngInQ.y;
-                    _vRelBuf[5] = vRelAngInQ.z;
-                }
-
                 float vPiInQ = _vRelBuf[dim];
-
-                // Current direction: toward M or toward Y.
-                var signX = (Mathf.Abs(m - y) < 1e-6f) ? 0f : Mathf.Sign(m - y);
-                var signV = (Mathf.Abs(vPiInQ) < 1e-6f) ? 0f : Mathf.Sign(vPiInQ);
-                var movingToM = signX != 0f && signV != 0f && signX == signV;
-                var dir = movingToM ? 1 : -1;
-
-                // Store measured velocity for debug before any modification.
                 _fieldLastVelocityInQ[dim] = vPiInQ;
 
-                // Weight at current position for current direction.
-                float wCurr = movingToM ? ed : eu;
+                // Direction: moving to M (Loss) or moving to Y (Gain).
+                var signX = Mathf.Abs(m - y) < 1e-6f ? 0f : Mathf.Sign(m - y);
+                var signV = Mathf.Abs(vPiInQ) < 1e-6f ? 0f : Mathf.Sign(vPiInQ);
+                bool movingToM = signX != 0f && signV != 0f && signX == signV;
 
-                // Toggle check: disabled → reset history, no bias.
-                bool toggledOff = false;
-                if (movingToM)
+                // Per-dim toggle: Loss for M direction, Gain for Y direction.
+                bool toggleOn = movingToM
+                    ? ((dim < 3)
+                        ? (_speedFieldPosLossEnabled == null || _speedFieldPosLossEnabled.val)
+                        : (_speedFieldRotLossEnabled == null || _speedFieldRotLossEnabled.val))
+                    : ((dim < 3)
+                        ? (_speedFieldPosGainEnabled == null || _speedFieldPosGainEnabled.val)
+                        : (_speedFieldRotGainEnabled == null || _speedFieldRotGainEnabled.val));
+
+                float followFactor = followFactors[dim];
+
+                // Linear transformation: weight = followFactor + input * (1 - followFactor)
+                //   Loss:  input = min(Ed, 1)            → weight ∈ [followFactor, 1]
+                //   Gain:  input = -Eu (∈ [-1, 0])        → weight ∈ [2·followFactor − 1, followFactor]
+                // The lerp uses weight directly; values outside [0, 1] extrapolate qpLocal.
+                float weight;
+                if (toggleOn)
                 {
-                    if (dim < 3 && _speedFieldPosLossEnabled != null && !_speedFieldPosLossEnabled.val) toggledOff = true;
-                    if (dim >= 3 && _speedFieldRotLossEnabled != null && !_speedFieldRotLossEnabled.val) toggledOff = true;
+                    float input = movingToM ? Mathf.Min(ed, 1f) : -eu;
+                    weight = followFactor + input * (1f - followFactor);
                 }
                 else
                 {
-                    if (dim < 3 && _speedFieldPosGainEnabled != null && !_speedFieldPosGainEnabled.val) toggledOff = true;
-                    if (dim >= 3 && _speedFieldRotGainEnabled != null && !_speedFieldRotGainEnabled.val) toggledOff = true;
-                }
-                if (toggledOff)
-                {
-                    _fieldLastWeight[dim] = 1f;
-                    _fieldWasActive[dim] = false;
-                    _fieldBiasVelocityInQ[dim] = 0f;
-                    if (dim < 3) biasPos[dim] = 0f;
-                    else biasEuler[dim - 3] = 0f;
-                    continue;
+                    weight = followFactor;
                 }
 
-                // Boundary check: Pi at/past bound.
-                bool atBoundary = signX != 0f && ((signX > 0f && x >= mu) || (signX < 0f && x <= ml));
-
-                // Compute v_new (desired Pi velocity in Q frame) using double precision.
-                double vNew;
-
-                if (!_fieldWasActive[dim])
-                {
-                    // First active frame → pass through, no conservation yet.
-                    vNew = vPiInQ;
-                    _fieldLastWeight[dim] = wCurr;
-                }
-                else if (_fieldLastMovingToM[dim] != movingToM)
-                {
-                    // Direction switch → velocity unchanged, start new weight chain.
-                    vNew = vPiInQ;
-                    _fieldLastWeight[dim] = wCurr;
-                }
-                else if (atBoundary)
-                {
-                    if (movingToM)
-                    {
-                        // Outward at boundary → infinite loss, full stop.
-                        vNew = 0.0;
-                    }
-                    else
-                    {
-                        // Inward at boundary → Eu ratio 0.99 (mild acceleration).
-                        vNew = vPiInQ / 0.99;
-                    }
-                    _fieldLastWeight[dim] = wCurr;
-                }
-                else
-                {
-                    // Normal conservation: v_new * wCurr = v_old * wPrev
-                    double wPrev = _fieldLastWeight[dim];
-                    vNew = vPiInQ * wPrev / Mathf.Max(wCurr, 1e-6f);
-                    _fieldLastWeight[dim] = wCurr;
-                }
-
-                _fieldLastMovingToM[dim] = movingToM;
-                _fieldWasActive[dim] = true;
-
-                double biasV = vNew - vPiInQ;
-                _fieldBiasVelocityInQ[dim] = (float)biasV;
-                _fieldNewVelocityInQ[dim] = (float)vNew;
-
-                if (dim < 3) biasPos[dim] = (float)(biasV * actualDt);
-                else biasEuler[dim - 3] = (float)(biasV * actualDt);
+                weights[dim] = weight;
             }
 
-            // Store bias for debug.
-            _fieldBiasPos = biasPos;
-            _fieldBiasEuler = biasEuler;
-
-            // Convert Q-frame bias into world space and apply to Pe.
-            if (UsesEngineHoldSpring)
-            {
-                if (biasPos.sqrMagnitude > 1e-12f)
-                    _controllerTargetPosition += _targetRotation * biasPos;
-                if (biasEuler.sqrMagnitude > 1e-12f)
-                {
-                    // Rotation bias applied as a delta in Q-frame, then composed.
-                    var biasRotQuat = Quaternion.Euler(biasEuler);
-                    var biasRotWorld = _targetRotation * biasRotQuat;
-                    _controllerTargetRotation = NormalizeQuaternion(biasRotWorld * _controllerTargetRotation);
-                }
-            }
-            else
-            {
-                if (biasPos.sqrMagnitude > 1e-12f)
-                    _referencePosition += _targetRotation * biasPos;
-                if (biasEuler.sqrMagnitude > 1e-12f)
-                {
-                    var biasRotQuat = Quaternion.Euler(biasEuler);
-                    var biasRotWorld = _targetRotation * biasRotQuat;
-                    _referenceRotation = NormalizeQuaternion(biasRotWorld * _referenceRotation);
-                }
-            }
+            return weights;
         }
 
         private void WriteToController(FreeControllerV3 ctrl)
@@ -1085,10 +989,8 @@ namespace ToySerialController.MotionSource
                 var ed = _fieldEd[dim];
                 var eu = _fieldEu[dim];
                 var vPiInQ = _fieldLastVelocityInQ[dim];
-                var vNew = _fieldNewVelocityInQ[dim];
-                var biasV = _fieldBiasVelocityInQ[dim];
 
-                lines.Add($"{dimLabels[dim]}: R={rx:F3}  Ed={ed:F2}  Eu={eu:F2}  vPinQ={vPiInQ:F3}  vNew={vNew:F3}  biasV={biasV:F3}");
+                lines.Add($"{dimLabels[dim]}: R={rx:F3}  Ed={ed:F2}  Eu={eu:F2}  vPinQ={vPiInQ:F3}");
             }
 
             _speedFieldDebugText.val = string.Join("\n", lines.ToArray());
@@ -1435,17 +1337,33 @@ namespace ToySerialController.MotionSource
 
             // Velocity follow: lerp qpLocal toward previous by factor k per dimension.
             // k=1 → Pi stationary in Q frame (qp doesn't change); k=0 → no effect.
-            if (IsVelocityFollowEnabled && _initialized)
+            // Speed field (when on) computes a dynamic per-dim k from Ed/Eu and the
+            // relative-velocity direction; otherwise the static follow sliders are used.
+            // Speed field force-enables velocity follow (ignore the Use Velocity Follow toggle).
+            bool speedFieldOn = _speedFieldEnabled != null && _speedFieldEnabled.val;
+            float[] speedFieldWeights = null;
+            if (speedFieldOn && _initialized)
+                speedFieldWeights = ComputeSpeedFieldWeights(targetRotation);
+
+            bool velocityFollowActive = _initialized && (IsVelocityFollowEnabled || speedFieldOn);
+            if (velocityFollowActive)
             {
+                float wx = speedFieldWeights != null ? speedFieldWeights[0] : _followRightFactor.val;
+                float wy = speedFieldWeights != null ? speedFieldWeights[1] : _followUpFactor.val;
+                float wz = speedFieldWeights != null ? speedFieldWeights[2] : _followForwardFactor.val;
+                float wpx = speedFieldWeights != null ? speedFieldWeights[3] : _followPitchFactor.val;
+                float wpy = speedFieldWeights != null ? speedFieldWeights[4] : _followTwistFactor.val;
+                float wpz = speedFieldWeights != null ? speedFieldWeights[5] : _followRollFactor.val;
+
                 qpLocalPosition = new Vector3(
-                    Mathf.Lerp(qpLocalPosition.x, _prevPiInQpLocalPosition.x, _followRightFactor.val),
-                    Mathf.Lerp(qpLocalPosition.y, _prevPiInQpLocalPosition.y, _followUpFactor.val),
-                    Mathf.Lerp(qpLocalPosition.z, _prevPiInQpLocalPosition.z, _followForwardFactor.val)
+                    Mathf.Lerp(qpLocalPosition.x, _prevPiInQpLocalPosition.x, wx),
+                    Mathf.Lerp(qpLocalPosition.y, _prevPiInQpLocalPosition.y, wy),
+                    Mathf.Lerp(qpLocalPosition.z, _prevPiInQpLocalPosition.z, wz)
                 );
                 qpLocalEuler = new Vector3(
-                    Mathf.Lerp(qpLocalEuler.x, _prevPiInQpLocalEuler.x, _followPitchFactor.val),
-                    Mathf.Lerp(qpLocalEuler.y, _prevPiInQpLocalEuler.y, _followTwistFactor.val),
-                    Mathf.Lerp(qpLocalEuler.z, _prevPiInQpLocalEuler.z, _followRollFactor.val)
+                    Mathf.Lerp(qpLocalEuler.x, _prevPiInQpLocalEuler.x, wpx),
+                    Mathf.Lerp(qpLocalEuler.y, _prevPiInQpLocalEuler.y, wpy),
+                    Mathf.Lerp(qpLocalEuler.z, _prevPiInQpLocalEuler.z, wpz)
                 );
             }
             _prevPiInQpLocalPosition = qpLocalPosition;
