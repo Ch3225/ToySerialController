@@ -1,8 +1,6 @@
-# ToySerialController DancerFork
+# ToySerialController Driven Dildo Fork
 
-ToySerialController DancerFork is a derivative of the original ToySerialController plugin, focused on MMD and dancer-oriented VaM workflows.
-
-This fork primarily adds and extends the Virtual Reference workflow so dancer-style motion can drive T-Code output with a controllable virtual insertion reference, follow behavior, and spring-damper motion.
+Please visit: https://hub.virtamate.com/resources/toyserialcontroller-driven-dildo-fork.66896/
 
 ## Upstream
 - Original project: ToySerialController
